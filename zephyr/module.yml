@@ -1,11 +1,11 @@
 # Delete all unused properties.
 
 # Give your module a name
-name: zmk-module-template
+name: zmk-module-force-uppercase
 build:
   # List your dependencies
   depends:
-    - zmk-module-force-uppercase
+  #  - dependency
   # Folder containing a "CMakeLists.txt" (. = root)
   cmake: .
   # Kconfig filepath
