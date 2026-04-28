@@ -20,6 +20,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
+
+// gotten from https://github.com/darknao/zmk/blob/2fad527cc5abed5bb59b4d4a4b0ee511d0e514e9/app/src/rgb_underglow.c#L320
 #define ZMK_LED_CAPSLOCK_BIT BIT(1)
 
 static int on_force_upper_binding_pressed(struct zmk_behavior_binding *binding,
@@ -30,7 +32,6 @@ static int on_force_upper_binding_pressed(struct zmk_behavior_binding *binding,
     zmk_hid_indicators_t indicators = zmk_hid_indicators_get_current_profile();
    // bool caps_active = (indicators & ZMK_HID_INDICATORS_CAPSLOCK) != 0;
   
-    #define ZMK_LED_CAPSLOCK_BIT BIT(1)
     bool caps_active = (indicators & ZMK_LED_CAPSLOCK_BIT) != 0;
     int ret;
 
