@@ -14,6 +14,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/hid_indicators.h>
 
+
+#define ZMK_LED_CAPSLOCK_BIT BIT(1)         // *** from https://github.com/darknao/zmk/blob/2fad527cc5abed5bb59b4d4a4b0ee511d0e514e9/app/src/rgb_underglow.c#L320 ***
+
 /* -----------------------------------------------------------------------
  * Shared helper: press or release a key, with an optional LSHIFT modifier.
  * shift_needed: true  → hold LSHIFT around the keycode event
@@ -56,7 +59,7 @@ static int send_key(uint32_t keycode, bool pressed, bool shift_needed,
 static int on_force_upper_binding_pressed(struct zmk_behavior_binding *binding,
                                           struct zmk_behavior_binding_event event) {
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    bool caps_active = (ind & ZMK_HID_INDICATORS_CAPSLOCK) != 0;
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
     /* Uppercase = bare key when caps ON, shifted key when caps OFF */
     bool need_shift = !caps_active;
     return send_key(binding->param1, true, need_shift, event.timestamp);
@@ -65,7 +68,7 @@ static int on_force_upper_binding_pressed(struct zmk_behavior_binding *binding,
 static int on_force_upper_binding_released(struct zmk_behavior_binding *binding,
                                            struct zmk_behavior_binding_event event) {
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    bool caps_active = (ind & ZMK_HID_INDICATORS_CAPSLOCK) != 0;
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
     bool need_shift = !caps_active;
     return send_key(binding->param1, false, need_shift, event.timestamp);
 }
@@ -100,7 +103,7 @@ BEHAVIOR_DT_INST_DEFINE(0, NULL, NULL, NULL, NULL,
 static int on_force_lower_binding_pressed(struct zmk_behavior_binding *binding,
                                           struct zmk_behavior_binding_event event) {
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    bool caps_active = (ind & ZMK_HID_INDICATORS_CAPSLOCK) != 0;
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
     /* Lowercase = bare key when caps OFF, shifted key when caps ON */
     bool need_shift = caps_active;
     return send_key(binding->param1, true, need_shift, event.timestamp);
@@ -109,7 +112,7 @@ static int on_force_lower_binding_pressed(struct zmk_behavior_binding *binding,
 static int on_force_lower_binding_released(struct zmk_behavior_binding *binding,
                                            struct zmk_behavior_binding_event event) {
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    bool caps_active = (ind & ZMK_HID_INDICATORS_CAPSLOCK) != 0;
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
     bool need_shift = caps_active;
     return send_key(binding->param1, false, need_shift, event.timestamp);
 }
