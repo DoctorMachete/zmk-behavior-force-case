@@ -1,0 +1,5 @@
+config ZMK_BEHAVIOR_FORCE_UPPER
+    bool
+    default y
+    depends on DT_HAS_ZMK_BEHAVIOR_FORCE_UPPER_ENABLED
+    depends on ZMK_HID_INDICATORS
