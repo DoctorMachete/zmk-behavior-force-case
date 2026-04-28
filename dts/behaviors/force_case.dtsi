@@ -6,12 +6,12 @@
 
 / {
     behaviors {
-        /omit-if-no-ref/ upper: force_upper {
+        /omit-if-no-ref/ fucase: force_upper {
             compatible = "zmk,behavior-force-upper";
             #binding-cells = <1>;
         };
 
-        /omit-if-no-ref/ lower: force_lower {
+        /omit-if-no-ref/ flcase: force_lower {
             compatible = "zmk,behavior-force-lower";
             #binding-cells = <1>;
         };
