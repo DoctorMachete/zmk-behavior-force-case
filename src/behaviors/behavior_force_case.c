@@ -14,8 +14,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/hid.h>
 #include <zmk/hid_indicators.h>
+#include <zmk/endpoints.h>
 
 #include <dt-bindings/zmk/modifiers.h>
+#include <dt-bindings/zmk/hid_usage_pages.h>
 
 #define ZMK_LED_CAPSLOCK_BIT BIT(1) // *** from https://github.com/darknao/zmk/blob/2fad527cc5abed5bb59b4d4a4b0ee511d0e514e9/app/src/rgb_underglow.c#L320 ***
 
@@ -25,91 +27,79 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* -----------------------------------------------------------------------
  * Shared helper.
  *
- * want_upper: true  → produce uppercase
- *             false → produce lowercase
+ * want_upper: true  → produce uppercase regardless of CapsLock
+ *             false → produce lowercase regardless of CapsLock
  *
- * We never raise fake LSHIFT press/release events onto the bus.
+ * We bypass the ZMK event bus entirely and drive the HID report layer
+ * directly — exactly what hid_listener.c does, but with full control
+ * over the shift bit.
  *
- * Two cases to handle, both solved purely at the HID report layer:
+ * This avoids every race between masked_modifiers/implicit_modifiers and
+ * hid_listener's SET_MODIFIERS recalculation.
  *
- * MASK case (natural=upper, want=lower, or natural=lower, want=upper
- *   with shift held):
- *   zmk_hid_masked_modifiers_set(ZMK_SHIFT_MODS) hides the held shift
- *   from the report. The keycode goes out bare → host sees lowercase
- *   (caps OFF) or uppercase (caps ON, shift masked out cancels the
- *   shift-cancels-caps effect... wait, that's wrong — see analysis below).
+ * Desired shift bit in the HID report:
+ *   caps OFF + want upper → shift=1   (shift produces uppercase)
+ *   caps OFF + want lower → shift=0   (bare  produces lowercase)
+ *   caps ON  + want upper → shift=0   (bare  produces uppercase, caps does it)
+ *   caps ON  + want lower → shift=1   (shift cancels caps → lowercase)
  *
- * The fundamental issue is that masked_modifiers only suppresses shift.
- * It cannot suppress CapsLock, which lives on the HOST side. So we must
- * always reason about what the host will produce given (caps, shift in
- * report) and correct from there.
+ *   report_shift = want_upper XOR caps_active
  *
- * Correction table — what to put in the HID report's shift bit so the
- * host produces the desired case:
- *
- *   caps OFF, want upper → shift=1  (shift gives uppercase)
- *   caps OFF, want lower → shift=0  (bare gives lowercase)
- *   caps ON,  want upper → shift=0  (bare gives uppercase, caps does it)
- *   caps ON,  want lower → shift=1  (shift cancels caps → lowercase)
- *
- * Therefore: report_shift = caps_active XOR want_upper XOR true
- *          = caps_active XNOR want_upper
- *          = !(caps_active XOR want_upper)
- *
- * Simpler: report_shift = (caps_active == want_upper)
- *   caps OFF, want upper → 0==1 → false → wait that's wrong...
- *
- * Let's just use the explicit truth table:
- *   caps=0 want_upper=1 → shift=1
- *   caps=0 want_upper=0 → shift=0
- *   caps=1 want_upper=1 → shift=0
- *   caps=1 want_upper=0 → shift=1
- *
- * report_shift = want_upper XOR caps_active
- *
- * So regardless of what shift is physically held, we need the HID report
- * to show shift = (want_upper XOR caps_active).
- *
- * We achieve this with only HID-layer calls (no bus events):
- *   • Always mask out physical shift: zmk_hid_masked_modifiers_set()
- *   • Then if report_shift needed: zmk_hid_register_mods(MOD_LSFT)
- *     to add it back silently, undone with zmk_hid_unregister_mods()
- *     after the event.
+ * Physical shift is completely ignored for the keycode itself — it only
+ * determines want_upper at the call site (binding handlers).  We mask it
+ * out of the report so it has zero effect on the character produced.
  * ----------------------------------------------------------------------- */
 static int send_key(uint32_t keycode, bool pressed, bool want_upper,
                     int64_t timestamp) {
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
-
-    /*
-     * Desired shift bit in the HID report:
-     *   caps OFF + want upper → shift=1
-     *   caps OFF + want lower → shift=0
-     *   caps ON  + want upper → shift=0
-     *   caps ON  + want lower → shift=1
-     * => report_shift = want_upper XOR caps_active
-     */
+    bool caps_active  = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
     bool report_shift = want_upper ^ caps_active;
 
     /*
-     * Always mask all physical shift out of the report first.
-     * This neutralises whatever the user is physically holding,
-     * giving us a clean slate to set the shift bit exactly as needed.
+     * Step 1 — strip all physical shift out of the report.
+     * zmk_hid_masked_modifiers_set suppresses explicit shift from
+     * the report without touching the event bus.
      */
     zmk_hid_masked_modifiers_set(ZMK_SHIFT_MODS);
 
+    /*
+     * Step 2 — press or release the keycode directly in the HID layer.
+     * zmk_hid_press/release update keyboard_report.body.keys but do NOT
+     * recalculate modifiers, so our mask is still in effect.
+     */
+    int ret;
+    if (pressed) {
+        ret = zmk_hid_press(ZMK_HID_USAGE(HID_USAGE_KEY, keycode));
+    } else {
+        ret = zmk_hid_release(ZMK_HID_USAGE(HID_USAGE_KEY, keycode));
+    }
+    if (ret < 0) {
+        zmk_hid_masked_modifiers_clear();
+        return ret;
+    }
+
+    /*
+     * Step 3 — set the shift modifier in the report to exactly what we
+     * need, using register/unregister which update explicit_modifiers
+     * and immediately recalculate the report via SET_MODIFIERS.
+     * Because the mask is still active, ONLY our injected shift (if any)
+     * appears in the outgoing report — physical shift remains suppressed.
+     */
     if (report_shift) {
-        /*
-         * Inject shift directly into the explicit modifier register.
-         * zmk_hid_register_mods() increments the ref-count for LSFT
-         * and updates the HID report — no bus event fired.
-         */
         zmk_hid_register_mods(MOD_LSFT);
     }
 
-    int ret = raise_zmk_keycode_state_changed_from_encoded(keycode, pressed, timestamp);
+    /*
+     * Step 4 — send the report to the host now, while the modifier
+     * state is exactly as we want it.
+     */
+    ret = zmk_endpoints_send_report(HID_USAGE_KEY);
 
-    /* Restore everything unconditionally so we never leave dirty state */
+    /*
+     * Step 5 — restore everything unconditionally.
+     * Remove our injected shift first, then clear the mask so physical
+     * shift reappears in the report for subsequent keypresses.
+     */
     if (report_shift) {
         zmk_hid_unregister_mods(MOD_LSFT);
     }
