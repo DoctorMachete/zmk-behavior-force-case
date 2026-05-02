@@ -50,63 +50,67 @@ static bool is_sticky_shift(void) {
 /* -----------------------------------------------------------------------
  * Shared helper.
  *
- * Key insight from hid_listener source:
- *   hid_listener calls SET_MODIFIERS(explicit_modifiers) which computes:
- *     report.modifiers = (explicit & ~masked) | implicit
- *   Then it calls zmk_endpoints_send_report().
+ * Now that we have hid_listener.c and hid.c, the flow is exactly known:
  *
- * So if we set masked and implicit BEFORE raising the event, hid_listener
- * will use our values when it computes the modifier byte and sends the
- * report. The report it sends will already be correct — we don't need to
- * send a second one.
+ * hid_listener_keycode_pressed:
+ *   1. zmk_hid_press(usage)
+ *   2. zmk_hid_register_mods(ev->explicit_modifiers)   [SET_MODIFIERS]
+ *   3. zmk_hid_implicit_modifiers_press(ev->implicit)  [implicit = ev->implicit (=0), SET_MODIFIERS]
+ *   4. zmk_endpoints_send_report()   ← sends WRONG report (wrong shift)
  *
- * For sticky key: it also runs as a listener on the same event. Since
- * ZMK_LISTENER priority order puts behavior_sticky_key BEFORE hid_listener
- * (sticky key registered first), sticky key processes and releases its
- * modifier (unregistering from explicit_mods) before hid_listener runs.
- * So by the time hid_listener calls SET_MODIFIERS, sticky shift is already
- * gone from explicit_mods — our mask+implicit correction still applies
- * correctly on top of that.
+ * hid_listener_keycode_released:
+ *   1. zmk_hid_release(usage)
+ *   2. zmk_endpoints_send_report()   (if SEPARATE_MOD_RELEASE_REPORT)
+ *   3. zmk_hid_unregister_mods(ev->explicit_modifiers)
+ *   4. zmk_hid_implicit_modifiers_release()  [implicit = 0, SET_MODIFIERS]
+ *   5. zmk_endpoints_send_report()   ← sends WRONG report
  *
- * With quick_release: sticky key calls ZMK_EVENT_RAISE_AFTER which
- * re-raises the event after itself. hid_listener runs again on the
- * re-raised event. But our mask is still set during this second pass
- * (we clear it only after raise returns), so the second send is also
- * correct.
+ * After raise_zmk_keycode_state_changed_from_encoded() returns:
+ *   - implicit_modifiers = 0  (cleared by hid_listener step 3/4)
+ *   - masked_modifiers = 0    (we never set it in this call)
+ *   - key is in/out of report correctly
+ *   - one wrong report already sent to host
  *
- * Sequence:
- *   1. snapshot want_upper (before anything changes)
- *   2. set masked_modifiers = ZMK_SHIFT_MODS
- *   3. if report_shift needed: zmk_hid_implicit_modifiers_press(MOD_LSFT)
- *   4. raise_zmk_keycode_state_changed_from_encoded(keycode, pressed)
- *        → sticky_key listener fires: releases if applicable
- *        → hid_listener fires: SET_MODIFIERS uses (explicit & ~masked)|implicit
- *          = correct shift bit; sends report → host gets correct output
- *        → ZMK_EVENT_RAISE_AFTER re-raises → hid_listener fires again
- *          → mask still set → second send also correct
- *   5. clear implicit (if set)
- *   6. clear mask
+ * We then apply our correction and send a second report.
+ * The host sees two consecutive reports; the second (correct) one wins.
+ * On BLE this is fine — characteristic notifications, last value wins.
+ * On USB HID this is fine — interrupt endpoint, host polls latest value.
+ *
+ * For sticky key: raise_... fires sticky key listener which processes
+ * the real keycode correctly (records at press, releases at key-up).
+ * sticky key's ZMK_EVENT_RAISE_AFTER also completes before raise returns,
+ * so hid_listener runs a second time for the re-raised event — but that
+ * second run also produces a wrong report, and our correction after the
+ * raise covers all of them since we send last.
+ *
+ * report_shift = want_upper XOR caps_active
  * ----------------------------------------------------------------------- */
 static int send_key(uint32_t keycode, bool pressed, bool want_upper) {
+    /*
+     * Raise real keycode on bus:
+     *   - sticky key processes it (records keycode, schedules/fires release)
+     *   - hid_listener updates key bitmap and sends a report (wrong shift)
+     * All of this completes synchronously before raise returns.
+     */
+    raise_zmk_keycode_state_changed_from_encoded(keycode, pressed, k_uptime_get());
+
+    /*
+     * Now correct the modifier state and re-send.
+     * implicit_modifiers and masked_modifiers are both 0 at this point
+     * (hid_listener cleared them). The key is correctly in/out of bitmap.
+     * We only need to fix the modifier byte and resend.
+     */
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
     bool caps_active  = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
     bool report_shift = want_upper ^ caps_active;
 
-    /* Set correction BEFORE raising — hid_listener will use these */
     zmk_hid_masked_modifiers_set(ZMK_SHIFT_MODS);
     if (report_shift) {
         zmk_hid_implicit_modifiers_press(MOD_LSFT);
     }
 
-    /*
-     * Raise the event. All listeners fire synchronously including sticky
-     * key (which releases if needed) and hid_listener (which sends the
-     * report with our corrected modifier state). ZMK_EVENT_RAISE_AFTER
-     * also completes synchronously before this returns.
-     */
-    int ret = raise_zmk_keycode_state_changed_from_encoded(keycode, pressed, k_uptime_get());
+    int ret = zmk_endpoints_send_report(HID_USAGE_KEY);
 
-    /* Restore — must happen after raise so re-raised events also benefit */
     if (report_shift) {
         zmk_hid_implicit_modifiers_release();
     }
